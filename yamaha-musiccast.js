@@ -3105,6 +3105,106 @@ class YamahaMusicCast extends EventEmitter {
   }
 
   /**
+   * @method discover
+   * @param {number} timeout - The timeout in milliseconds.
+   * @description Discovers Yamaha receivers on the network.
+   * @returns {Promise[{address: string, port: number}]}
+   * @public
+   */
+  discover(timeout = 3000) {
+    return new Promise((resolve, reject) => {
+      // Create a new UDP client
+      const client = dgram.createSocket('udp4');
+      // List of found devices
+      const devices = [];
+
+      const SSDP_PORT = 1900;
+      const SSDP_ADDR = '239.255.255.250';
+      const SEARCH_TARGET = 'urn:schemas-upnp-org:device:MediaRenderer:1';
+
+      // Parse the location from the message string
+      const parseLocationFromMessage = (message) => {
+        const regex = /Location: (.+)/i;
+        const match = regex.exec(message);
+        if (match && match[1]) {
+          return match[1];
+        }
+        return null;
+      }
+      
+      // Listen for 'message' events
+      client.on('message', (msg, rinfo) => {
+        const message = msg.toString();
+        if (message.includes(SEARCH_TARGET) && message.includes('.xml')) {
+          devices.push({
+            ip: rinfo.address,
+            location: parseLocationFromMessage(message)
+          });
+        }
+      });
+
+      // Bind the client to the SSDP port
+      client.bind(() => {
+        // Set the client to broadcast mode
+        client.setBroadcast(true);
+
+        // Format the search request
+        const searchRequest =
+          `M-SEARCH * HTTP/1.1\r\n` +
+          `HOST: ${SSDP_ADDR}:${SSDP_PORT}\r\n` +
+          `MAN: "ssdp:discover"\r\n` +
+          `MX: 3\r\n` +
+          `ST: ${SEARCH_TARGET}\r\n` +
+          `\r\n`;
+
+        // Send the search request
+        client.send(searchRequest, 0, searchRequest.length, SSDP_PORT, SSDP_ADDR, (error) => {
+          if (error) {
+            client.close();
+            reject(error);
+          } else {
+            setTimeout(() => {
+              client.close();
+              
+              // Get the device information for each receiver
+              const promises = [];
+              devices.forEach((receiver) => {
+                promises.push(axios.get(receiver.location));
+              });
+
+              // Wait for all device information requests to complete
+              Promise.all(promises).then((responses) => {
+                responses.forEach((response, index) => {
+                  const xml = String(response.data);
+
+                  // Delete the location property
+                  delete devices[index].location;
+
+                  // Get the device information
+                  devices[index].name = /<friendlyName>([^<]*)<\/friendlyName>/i.exec(xml)[1] || null;
+                  devices[index].manufacturer = /<manufacturer>([^<]*)<\/manufacturer>/i.exec(xml)[1] || null;
+                  devices[index].manufacturerURL = /<manufacturerURL>([^<]*)<\/manufacturerURL>/i.exec(xml)[1] || null;
+                  devices[index].modelDescription = /<modelDescription>([^<]*)<\/modelDescription>/i.exec(xml)[1] || null;
+                  devices[index].modelName = /<modelName>([^<]*)<\/modelName>/i.exec(xml)[1] || null;
+                  devices[index].modelNumber = /<modelNumber>([^<]*)<\/modelNumber>/i.exec(xml)[1] || null;
+                  devices[index].modelURL = /<modelURL>([^<]*)<\/modelURL>/i.exec(xml)[1] || null;
+                  devices[index].serialNumber = /<serialNumber>([^<]*)<\/serialNumber>/i.exec(xml)[1] || null;
+                  devices[index].uuid = /<UDN>uuid:([^<]*)<\/UDN>/i.exec(xml)[1].toUpperCase() || null;
+                });
+
+                // Resolve the promise with the list of devices found.
+                resolve(devices);
+              }).catch((error) => {
+                reject(error);
+              });
+            }, timeout);
+          }
+        });
+      });
+    });
+  }
+
+  /**
    * @getter ip
    * @description Gets the Yamaha receiver IP address.
    * @returns {string}
